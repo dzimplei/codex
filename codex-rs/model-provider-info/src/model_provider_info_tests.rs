@@ -878,3 +878,23 @@ model_catalog_url = "https://gateway.example/codex/catalog?token=catalog-secret"
         "https://gateway.example/v1"
     );
 }
+
+#[test]
+fn native_protocol_configuration_does_not_borrow_chatgpt_or_websocket_auth() {
+    for protocol in ["anthropic_messages", "chat_completions"] {
+        let text = format!(
+            "name='Native fixture'\nbase_url='http://127.0.0.1:54321/v1'\nwire_api='{protocol}'\nrequires_openai_auth=false\nsupports_websockets=false"
+        );
+        let mut provider: ModelProviderInfo = toml::from_str(&text).unwrap();
+        assert!(provider.validate().is_ok());
+        assert_eq!(provider.wire_api.to_string(), protocol);
+        provider.requires_openai_auth = true;
+        assert!(provider.validate().is_err());
+        provider.requires_openai_auth = false;
+        provider.supports_websockets = true;
+        assert!(provider.validate().is_err());
+        provider.supports_websockets = false;
+        provider.base_url = None;
+        assert!(provider.validate().is_err());
+    }
+}

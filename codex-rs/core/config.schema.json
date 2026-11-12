@@ -6544,6 +6544,20 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "Native Anthropic Messages HTTP/SSE.",
+          "enum": [
+            "anthropic_messages"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Native OpenAI-compatible Chat Completions HTTP/SSE.",
+          "enum": [
+            "chat_completions"
+          ],
+          "type": "string"
         }
       ]
     },

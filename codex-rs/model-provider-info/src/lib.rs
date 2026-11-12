@@ -105,12 +105,20 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// Native Anthropic Messages HTTP/SSE.
+    #[serde(rename = "anthropic_messages")]
+    AnthropicMessages,
+    /// Native OpenAI-compatible Chat Completions HTTP/SSE.
+    #[serde(rename = "chat_completions")]
+    ChatCompletions,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::AnthropicMessages => "anthropic_messages",
+            Self::ChatCompletions => "chat_completions",
         };
         f.write_str(value)
     }
@@ -124,8 +132,13 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
+            "anthropic_messages" => Ok(Self::AnthropicMessages),
+            "chat_completions" => Ok(Self::ChatCompletions),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "anthropic_messages", "chat_completions"],
+            )),
         }
     }
 }
@@ -290,6 +303,25 @@ other non-default provider fields are not supported"
     }
 
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.wire_api != WireApi::Responses {
+            if self.requires_openai_auth
+                || self.supports_websockets
+                || self.aws.is_some()
+                || self.gateway_oauth.is_some()
+            {
+                return Err("native model protocols cannot use ChatGPT authentication, Responses WebSockets, AWS signing or gateway OAuth".into());
+            }
+            if self.base_url.as_ref().is_none_or(|s| s.trim().is_empty()) {
+                return Err("native model protocols require an explicit base_url".into());
+            }
+            if self.wire_api == WireApi::AnthropicMessages
+                && (self.env_key.is_some()
+                    || self.auth.is_some()
+                    || self.experimental_bearer_token.is_some())
+            {
+                return Err("Anthropic Messages requires env_http_headers = { x-api-key = \"ANTHROPIC_API_KEY\" }; bearer credentials are not sent as API keys".into());
+            }
+        }
         if let Some(gateway) = &self.gateway_oauth {
             gateway.validate(self)?;
         }

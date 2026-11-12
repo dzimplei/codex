@@ -3,6 +3,9 @@ use crate::common::ResponseStream;
 use crate::common::ResponsesApiRequest;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
+use crate::native::NativeProtocol;
+use crate::native::native_request;
+use crate::native::spawn_native_stream;
 use crate::provider::Provider;
 use crate::requests::Compression;
 use crate::requests::headers::build_session_headers;
@@ -25,6 +28,7 @@ use tracing::instrument;
 
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
+    protocol: NativeProtocol,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
 }
 
@@ -42,8 +46,15 @@ impl<T: HttpTransport> ResponsesClient<T> {
     pub fn new(transport: T, provider: Provider, auth: SharedAuthProvider) -> Self {
         Self {
             session: EndpointSession::new(transport, provider, auth),
+            protocol: NativeProtocol::Responses,
             sse_telemetry: None,
         }
+    }
+
+    /// Selects an explicitly configured native protocol; never detects a model family.
+    pub fn with_protocol(mut self, protocol: NativeProtocol) -> Self {
+        self.protocol = protocol;
+        self
     }
 
     pub fn with_telemetry(
@@ -53,6 +64,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
     ) -> Self {
         Self {
             session: self.session.with_request_telemetry(request),
+            protocol: self.protocol,
             sse_telemetry: sse,
         }
     }
@@ -127,28 +139,59 @@ impl<T: HttpTransport> ResponsesClient<T> {
         compression: Compression,
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
-        let request_compression = match compression {
+        let (body, tools) = if self.protocol == NativeProtocol::Responses {
+            (body, Vec::new())
+        } else {
+            let request: Value =
+                serde_json::from_slice(body.as_bytes()).map_err(|_| ApiError::InvalidRequest {
+                    message: "Cannot decode native inference input".into(),
+                })?;
+            let (request, tools) = native_request(&request, self.protocol)?;
+            (
+                EncodedJsonBody::encode(&request).map_err(|e| ApiError::InvalidRequest {
+                    message: e.to_string(),
+                })?,
+                tools,
+            )
+        };
+        let path = match self.protocol {
+            NativeProtocol::Responses => "/responses",
+            NativeProtocol::AnthropicMessages => "/messages",
+            NativeProtocol::ChatCompletions => "/chat/completions",
+        };
+        let request_compression = match if self.protocol == NativeProtocol::Responses {
+            compression
+        } else {
+            Compression::None
+        } {
             Compression::None => RequestCompression::None,
             Compression::Zstd => RequestCompression::Zstd,
         };
 
         let stream_response = self
             .session
-            .stream_encoded_json_with(
-                Method::POST,
-                "/responses",
-                extra_headers,
-                Some(body),
-                |req| {
-                    req.headers.insert(
-                        http::header::ACCEPT,
-                        HeaderValue::from_static("text/event-stream"),
-                    );
-                    req.compression = request_compression;
-                },
-            )
+            .stream_encoded_json_with(Method::POST, path, extra_headers, Some(body), |req| {
+                req.headers.insert(
+                    http::header::ACCEPT,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                req.compression = request_compression;
+                if self.protocol == NativeProtocol::AnthropicMessages {
+                    req.headers
+                        .entry("anthropic-version")
+                        .or_insert(HeaderValue::from_static("2023-06-01"));
+                }
+            })
             .await?;
 
+        if self.protocol != NativeProtocol::Responses {
+            return Ok(spawn_native_stream(
+                stream_response,
+                self.protocol,
+                tools,
+                self.session.provider().stream_idle_timeout,
+            ));
+        }
         Ok(spawn_response_stream(
             stream_response,
             self.session.provider().stream_idle_timeout,
